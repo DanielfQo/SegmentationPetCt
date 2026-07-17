@@ -4,12 +4,12 @@ from monai.networks.nets import SegResNetDS
 from monai.losses import DiceCELoss, DeepSupervisionLoss
 
 # ======== KNOBS (empieza con los del paper y baja poco a poco) ========
-PATCH        = 192              # paper: 192  ->  primer candidato a reducir
+PATCH        = 128              # paper: 192  ->  primer candidato a reducir
 INIT_FILTERS = 32               # paper: 32
 BLOCKS_DOWN  = (1, 2, 2, 4, 4, 4)  # paper
 DSDEPTH      = 4                # paper: 4 cabezas
 BATCH        = 1               # paper: 1 por GPU
-USE_AMP      = False            # ponlo True para ahorrar ~40-50% de memoria
+USE_AMP      = True            # ponlo True para ahorrar ~40-50% de memoria
 # =====================================================================
 
 dev = "cuda" if torch.cuda.is_available() else "cpu"
