@@ -1,8 +1,9 @@
 # train_1fold.py
 import json
+import os
 import torch
 from torch.utils.data import DataLoader
-from monai.data import CacheDataset, decollate_batch
+from monai.data import PersistentDataset, decollate_batch
 from monai.losses import DiceCELoss, DeepSupervisionLoss
 from monai.metrics import DiceMetric
 from monai.inferers import sliding_window_inference
@@ -17,7 +18,6 @@ DSDEPTH      = 4
 USE_AMP      = True
 MAX_EPOCHS   = 300          # paper: 300
 VAL_EVERY    = 5
-CACHE_RATE   = 0.0          # sube si tienes RAM de sobra (acelera mucho)
 # =======================
 
 dev = "cuda" if torch.cuda.is_available() else "cpu"
@@ -38,9 +38,14 @@ val_files   = [{"ct": d["image"][0], "pt": d["image"][1], "label": d["label"]}
 
 print(f"Train cases: {len(train_files)}, Val cases: {len(val_files)}")
 
-train_ds = CacheDataset(train_files, preprocessing(train=True, patch=PATCH),
-                        cache_rate=CACHE_RATE)
-val_ds   = CacheDataset(val_files,   preprocessing(train=False), cache_rate=CACHE_RATE)
+# Crear directorios de caché para preprocesamiento persistente
+cache_dir_train = "./persistent_cache_train"
+cache_dir_val   = "./persistent_cache_val"
+os.makedirs(cache_dir_train, exist_ok=True)
+os.makedirs(cache_dir_val, exist_ok=True)
+
+train_ds = PersistentDataset(train_files, preprocessing(train=True, patch=PATCH), cache_dir=cache_dir_train)
+val_ds   = PersistentDataset(val_files,   preprocessing(train=False), cache_dir=cache_dir_val)
 train_ld = DataLoader(train_ds, batch_size=1, shuffle=True, num_workers=4)
 val_ld   = DataLoader(val_ds,   batch_size=1, shuffle=False, num_workers=2)
 
