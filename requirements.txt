@@ -1,0 +1,7 @@
+# PyTorch with CUDA 12.1 support (should be installed via --index-url first)
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch
+monai[all]==1.6.0
+nibabel
+tqdm
+einops
