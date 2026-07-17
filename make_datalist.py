@@ -4,11 +4,26 @@ import glob
 import os
 import random
 
-# Adjust these paths as needed. For HECKTOR 2025, filenames are _0000.nii.gz and _0001.nii.gz.
-# For HECKTOR 2022, they are __CT.nii.gz and __PT.nii.gz.
-IMG_DIR = "../../HECKTOR 2025 Training Data/imagesTr"
-LBL_DIR = "../../HECKTOR 2025 Training Data/labelsTr"
+# Candidate paths for the dataset root
+candidates = [
+    "../../HECKTOR2025_raw",
+
+]
+
+dataset_root = None
+for c in candidates:
+    if os.path.exists(c):
+        dataset_root = c
+        break
+
+if dataset_root is None:
+    # Fallback to HECKTOR2025_raw if none found
+    dataset_root = "../../HECKTOR2025_raw"
+
+IMG_DIR = f"{dataset_root}/imagesTr"
+LBL_DIR = f"{dataset_root}/labelsTr"
 random.seed(0)
+
 
 # Check for HECKTOR 2025 suffix first, fallback to 2022
 is_hecktor_2025 = len(glob.glob(f"{IMG_DIR}/*_0000.nii.gz")) > 0
