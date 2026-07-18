@@ -62,7 +62,11 @@ class AugmentedDataset(torch.utils.data.Dataset):
         return len(self.base_ds)
     def __getitem__(self, idx):
         data = self.base_ds[idx]
-        return self.transform(data)
+        result = self.transform(data)
+        # RandCropByLabelClassesd con num_samples=1 devuelve una lista de 1 dict
+        if isinstance(result, list):
+            return result[0]
+        return result
 
 train_aug_ds = AugmentedDataset(train_ds, random_xf)
 train_ld = DataLoader(train_aug_ds, batch_size=1, shuffle=True, num_workers=4)
