@@ -121,7 +121,7 @@ for epoch in range(MAX_EPOCHS):
                 y = batch["label"].to(dev)
                 with torch.amp.autocast("cuda", enabled=USE_AMP):
                     logits = sliding_window_inference(
-                        x, roi_size=(192, 192, 192), sw_batch_size=1,
+                        x, roi_size=(PATCH, PATCH, PATCH), sw_batch_size=1,
                         predictor=lambda t: net(t)[0],   # solo la salida a full-res
                         overlap=0.5)
                 preds  = [post_pred(p)  for p in decollate_batch(logits)]
