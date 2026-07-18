@@ -1,4 +1,5 @@
 # transforms_hecktor.py
+import torch
 from monai import transforms as T
 
 KEYS = ["ct", "pt", "label"]
@@ -14,25 +15,41 @@ def deterministic_transforms():
         T.Spacingd(keys=["ct", "pt"], pixdim=(1, 1, 1), mode="bilinear"),
         T.Spacingd(keys=["label"],   pixdim=(1, 1, 1), mode="nearest"),
 
-        # (b) Recorte aprox. de la región H&N.
+        # (b) Recorte a la silueta del cuerpo por CT (umbral HU aire/cuerpo). Va después
+        # de Spacingd porque ahí CT/PT/label ya comparten grilla; antes de resamplear no
+        # tienen el mismo shape y el bounding box no se podría aplicar por igual a las 3 keys.
+        T.CropForegroundd(keys=KEYS, source_key="ct",
+                           select_fn=lambda x: x > -500, allow_smaller=True),
+
+        # (c) Recorte fino a la región H&N usando la señal PET.
         T.CropForegroundd(keys=KEYS, source_key="pt", allow_smaller=True),
 
-        # (c) Normalización por canal (fiel al paper):
+        # (d) Normalización por canal (fiel al paper):
         T.ScaleIntensityRanged(keys=["ct"], a_min=-200, a_max=400,
                                b_min=0.0, b_max=1.0, clip=False),
         T.NormalizeIntensityd(keys=["pt"], nonzero=True, channel_wise=True),
         T.Lambdad(keys=["ct", "pt"], func=lambda x: 1.0 / (1.0 + (-x).exp())),
 
-        # (d) Concatenar CT+PET -> imagen de 2 canales
+        # (e) Concatenar CT+PET -> imagen de 2 canales
         T.ConcatItemsd(keys=["ct", "pt"], name="image", dim=0),
 
-        T.EnsureTyped(keys=["image", "label"]),
+        # (f) Cachear "image" en float16 (mitad de tamaño en disco). El entrenamiento usa
+        # AMP igual, así que no se pierde precisión relevante. "label" queda como está
+        # (son enteros de clase, no vale la pena tocarlo).
+        T.EnsureTyped(keys=["image"], dtype=torch.float16),
+        T.EnsureTyped(keys=["label"]),
     ])
 
 
 def random_transforms(patch=128):
     """Transformaciones aleatorias (se aplican on-the-fly en cada época)."""
     return T.Compose([
+        # La caché guarda "image" en float16 (ver deterministic_transforms). RandAffined usa
+        # grid_sample, que no soporta float16 en CPU (los workers del DataLoader corren en
+        # CPU), así que subimos a float32 antes de augmentar. El costo es solo por-parche,
+        # no por todo el volumen cacheado.
+        T.EnsureTyped(keys=["image"], dtype=torch.float32),
+
         # Parche centrado en clases foreground: 0.45 tumor, 0.45 ganglios, 0.1 fondo
         T.RandCropByLabelClassesd(
             keys=["image", "label"], label_key="label",
