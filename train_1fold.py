@@ -1,6 +1,10 @@
 # train_1fold.py
 import json
 import os
+
+# Reduce fragmentación del allocator de CUDA (debe fijarse antes de crear contexto CUDA)
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import csv
 import torch
 from torch.utils.data import DataLoader
@@ -13,7 +17,11 @@ from monai.transforms import AsDiscrete
 from transforms_hecktor import deterministic_transforms, random_transforms, val_transforms
 
 # ======== KNOBS ========
-PATCH        = 128          # ajusta según §7
+# Tu GPU tiene ~7.6 GiB. PATCH=128 + INIT_FILTERS=32 + DSDEPTH=4 no cupo (OOM en backward
+# de la 1ra iteración). Corre memprobe.py para hallar la combinación más grande que sí quepa
+# y actualiza estos valores en consecuencia (deja 1 escalón de margen para el pico real,
+# que sí tiene overhead de dataloader/augmentation que el sweep sintético no captura).
+PATCH        = 96
 INIT_FILTERS = 32
 DSDEPTH      = 4
 USE_AMP      = True
@@ -119,6 +127,8 @@ for epoch in range(MAX_EPOCHS):
     
     if (epoch + 1) % VAL_EVERY == 0:
         net.eval()
+        if dev == "cuda":
+            torch.cuda.empty_cache()  # libera bloques cacheados del entrenamiento antes de stitchear
         with torch.no_grad():
             for batch in val_ld:
                 x = batch["image"].to(dev)
@@ -127,7 +137,8 @@ for epoch in range(MAX_EPOCHS):
                     logits = sliding_window_inference(
                         x, roi_size=(PATCH, PATCH, PATCH), sw_batch_size=1,
                         predictor=lambda t: net(t)[0],   # solo la salida a full-res
-                        overlap=0.5)
+                        overlap=0.5, sw_device=dev, device="cpu")  # stitching en CPU: el volumen
+                        # completo (3 canales, tamaño real del paciente) no compite por VRAM con el training
                 preds  = [post_pred(p)  for p in decollate_batch(logits)]
                 labels = [post_label(l) for l in decollate_batch(y)]
                 dice_metric(y_pred=preds, y=labels)
