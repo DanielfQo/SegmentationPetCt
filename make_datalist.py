@@ -4,24 +4,45 @@ import glob
 import os
 import random
 
-# Candidate paths for the dataset root
-candidates = [
-    "../../HECKTOR2025_raw",
+# We search for the dataset directory in multiple possible relative paths,
+# checking both from the current working directory and the script's file location.
+script_dir = os.path.dirname(os.path.abspath(__file__)) if '__file__' in locals() else '.'
 
+relative_dirs = [
+    "HECKTOR2025_raw",
+    "../HECKTOR2025_raw",
+    "../../HECKTOR2025_raw",
+    "../../../HECKTOR2025_raw",
+    "HECKTOR 2025 Training Data",
+    "../HECKTOR 2025 Training Data",
+    "../../HECKTOR 2025 Training Data",
+    "data",
+    "../data",
+    "../../data",
 ]
 
 dataset_root = None
-for c in candidates:
-    if os.path.exists(c):
-        dataset_root = c
+
+# Search relative to current working directory first, then relative to the script
+for r_dir in relative_dirs:
+    # Check relative to CWD
+    if os.path.exists(r_dir) and os.path.isdir(r_dir):
+        dataset_root = os.path.abspath(r_dir)
+        break
+    # Check relative to script directory
+    script_rel = os.path.join(script_dir, r_dir)
+    if os.path.exists(script_rel) and os.path.isdir(script_rel):
+        dataset_root = os.path.abspath(script_rel)
         break
 
 if dataset_root is None:
-    # Fallback to HECKTOR2025_raw if none found
-    dataset_root = "../../HECKTOR2025_raw"
+    # Fallback default
+    dataset_root = os.path.abspath("../../HECKTOR2025_raw")
 
-IMG_DIR = f"{dataset_root}/imagesTr"
-LBL_DIR = f"{dataset_root}/labelsTr"
+IMG_DIR = os.path.join(dataset_root, "imagesTr")
+LBL_DIR = os.path.join(dataset_root, "labelsTr")
+print(f"Buscando dataset en: {dataset_root}")
+
 random.seed(0)
 
 
