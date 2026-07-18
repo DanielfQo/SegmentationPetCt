@@ -96,18 +96,21 @@ if not cases_dict:
                     "label": lbl_path
                 }
 
-# Shuffle and split
+# Shuffle and split: 70% train / 15% val / 15% test
 cases = sorted(list(cases_dict.keys()))
 random.seed(0)
 random.shuffle(cases)
 
-n_val = int(len(cases) * 0.2)
-val, train = cases[:n_val], cases[n_val:]
+n_test = int(len(cases) * 0.15)
+n_val  = int(len(cases) * 0.15)
+test_cases = cases[:n_test]
+val_cases  = cases[n_test:n_test + n_val]
+train_cases = cases[n_test + n_val:]
 
 datalist = {
-    "training":   [{**cases_dict[c], "fold": 0} for c in val]   # fold 0 = validación
-                + [{**cases_dict[c], "fold": 1} for c in train], # fold 1 = entrenamiento
+    "training":   [{**cases_dict[c], "fold": 0} for c in val_cases]    # fold 0 = validación
+                + [{**cases_dict[c], "fold": 1} for c in train_cases], # fold 1 = entrenamiento
+    "testing":    [{**cases_dict[c]} for c in test_cases],
 }
 json.dump(datalist, open("datalist_1fold.json", "w"), indent=2)
-print(f"Total detectados: {len(cases)} casos -> train {len(train)} / val {len(val)}")
-
+print(f"Total detectados: {len(cases)} casos -> train {len(train_cases)} / val {len(val_cases)} / test {len(test_cases)}")
