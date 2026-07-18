@@ -10,7 +10,7 @@ from monai.metrics import DiceMetric
 from monai.inferers import sliding_window_inference
 from monai.networks.nets import SegResNetDS
 from monai.transforms import AsDiscrete
-from transforms_hecktor import preprocessing   # del §3
+from transforms_hecktor import deterministic_transforms, random_transforms, val_transforms
 
 # ======== KNOBS ========
 PATCH        = 128          # ajusta según §7
@@ -45,10 +45,28 @@ cache_dir_val   = "./persistent_cache_val"
 os.makedirs(cache_dir_train, exist_ok=True)
 os.makedirs(cache_dir_val, exist_ok=True)
 
-train_ds = PersistentDataset(train_files, preprocessing(train=True, patch=PATCH), cache_dir=cache_dir_train)
-val_ds   = PersistentDataset(val_files,   preprocessing(train=False), cache_dir=cache_dir_val)
-train_ld = DataLoader(train_ds, batch_size=1, shuffle=True, num_workers=4)
-val_ld   = DataLoader(val_ds,   batch_size=1, shuffle=False, num_workers=2)
+# PersistentDataset cachea SOLO las transformaciones deterministas (pesadas).
+# Las transformaciones aleatorias (data augmentation) se aplican on-the-fly después.
+train_ds = PersistentDataset(train_files, deterministic_transforms(), cache_dir=cache_dir_train)
+val_ds   = PersistentDataset(val_files,   val_transforms(), cache_dir=cache_dir_val)
+
+# Wrapper que aplica augmentation al vuelo sobre los datos cacheados
+random_xf = random_transforms(patch=PATCH)
+
+class AugmentedDataset(torch.utils.data.Dataset):
+    """Wrapper que aplica transformaciones aleatorias on-the-fly sobre un dataset cacheado."""
+    def __init__(self, base_ds, transform):
+        self.base_ds = base_ds
+        self.transform = transform
+    def __len__(self):
+        return len(self.base_ds)
+    def __getitem__(self, idx):
+        data = self.base_ds[idx]
+        return self.transform(data)
+
+train_aug_ds = AugmentedDataset(train_ds, random_xf)
+train_ld = DataLoader(train_aug_ds, batch_size=1, shuffle=True, num_workers=4)
+val_ld   = DataLoader(val_ds,       batch_size=1, shuffle=False, num_workers=2)
 
 # --- modelo / loss / optim ---
 net = SegResNetDS(spatial_dims=3, init_filters=INIT_FILTERS, in_channels=2,
