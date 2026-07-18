@@ -94,15 +94,32 @@ post_pred  = AsDiscrete(argmax=True, to_onehot=3)
 post_label = AsDiscrete(to_onehot=3)
 dice_metric = DiceMetric(include_background=False, reduction="mean_batch")
 
+# --- checkpoint / resume: siempre se retoma desde el último mejor guardado, no desde
+# donde se cortó el entrenamiento (así un crash nunca deja el modelo en un estado peor) ---
+ckpt_path = "best_checkpoint.pt"
+best = -1.0
+start_epoch = 0
+resuming = os.path.exists(ckpt_path)
+if resuming:
+    ckpt = torch.load(ckpt_path, map_location=dev, weights_only=False)
+    net.load_state_dict(ckpt["model"])
+    opt.load_state_dict(ckpt["optimizer"])
+    sched.load_state_dict(ckpt["scheduler"])
+    scaler.load_state_dict(ckpt["scaler"])
+    best = ckpt["best_dice"]
+    start_epoch = ckpt["epoch"]
+    print(f"Checkpoint encontrado: retomando desde el mejor guardado "
+          f"(epoch {start_epoch}, dice {best:.4f}).")
+
 # --- log de métricas ---
 csv_file = "metrics_log.csv"
-# Si ya existe, lo sobrescribimos con las cabeceras
-with open(csv_file, mode="w", newline="") as f:
-    writer = csv.writer(f)
-    writer.writerow(["epoch", "loss", "dice_tumor", "dice_ganglios", "mean_dice"])
+# Si venimos de un resume, mantenemos el log existente; si no, lo (re)creamos con cabeceras.
+if not (resuming and os.path.exists(csv_file)):
+    with open(csv_file, mode="w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["epoch", "loss", "dice_tumor", "dice_ganglios", "mean_dice"])
 
-best = -1.0
-for epoch in range(MAX_EPOCHS):
+for epoch in range(start_epoch, MAX_EPOCHS):
     net.train()
     epoch_loss = 0
     for batch in train_ld:
@@ -153,6 +170,14 @@ for epoch in range(MAX_EPOCHS):
             if mean_dice > best:
                 best = mean_dice
                 torch.save(net.state_dict(), "best_fold.pt")
+                torch.save({
+                    "epoch": epoch + 1,
+                    "model": net.state_dict(),
+                    "optimizer": opt.state_dict(),
+                    "scheduler": sched.state_dict(),
+                    "scaler": scaler.state_dict(),
+                    "best_dice": best,
+                }, ckpt_path)
                 print("Guardado nuevo mejor modelo.")
 
     # Guardar en CSV
