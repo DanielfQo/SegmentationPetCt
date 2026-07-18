@@ -1,6 +1,7 @@
 # train_1fold.py
 import json
 import os
+import csv
 import torch
 from torch.utils.data import DataLoader
 from monai.data import PersistentDataset, decollate_batch
@@ -63,6 +64,13 @@ post_pred  = AsDiscrete(argmax=True, to_onehot=3)
 post_label = AsDiscrete(to_onehot=3)
 dice_metric = DiceMetric(include_background=False, reduction="mean_batch")
 
+# --- log de métricas ---
+csv_file = "metrics_log.csv"
+# Si ya existe, lo sobrescribimos con las cabeceras
+with open(csv_file, mode="w", newline="") as f:
+    writer = csv.writer(f)
+    writer.writerow(["epoch", "loss", "dice_tumor", "dice_ganglios", "mean_dice"])
+
 best = -1.0
 for epoch in range(MAX_EPOCHS):
     net.train()
@@ -83,6 +91,10 @@ for epoch in range(MAX_EPOCHS):
     print(f"epoch {epoch+1:3d}/{MAX_EPOCHS}  loss={mean_loss:.4f}")
 
     # --- validación con sliding window (parche 192^3 como en inferencia del paper) ---
+    val_tumor = ""
+    val_ganglios = ""
+    val_mean = ""
+    
     if (epoch + 1) % VAL_EVERY == 0:
         net.eval()
         with torch.no_grad():
@@ -100,11 +112,19 @@ for epoch in range(MAX_EPOCHS):
             scores = dice_metric.aggregate()      # [dice_tumor, dice_ganglios]
             dice_metric.reset()
             mean_dice = scores.mean().item()
-            print(f"epoch {epoch+1:3d}  dice_tumor={scores[0]:.4f}  "
-                  f"dice_ganglios={scores[1]:.4f}  media={mean_dice:.4f}")
+            val_tumor = f"{scores[0]:.4f}"
+            val_ganglios = f"{scores[1]:.4f}"
+            val_mean = f"{mean_dice:.4f}"
+            print(f"epoch {epoch+1:3d}  dice_tumor={val_tumor}  "
+                  f"dice_ganglios={val_ganglios}  media={val_mean}")
             if mean_dice > best:
                 best = mean_dice
                 torch.save(net.state_dict(), "best_fold.pt")
                 print("Guardado nuevo mejor modelo.")
+
+    # Guardar en CSV
+    with open(csv_file, mode="a", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([epoch + 1, f"{mean_loss:.4f}", val_tumor, val_ganglios, val_mean])
 
 print(f"Mejor Dice medio en validación: {best:.4f}")
