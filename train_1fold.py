@@ -136,7 +136,7 @@ for epoch in range(MAX_EPOCHS):
                 with torch.amp.autocast("cuda", enabled=USE_AMP):
                     logits = sliding_window_inference(
                         x, roi_size=(PATCH, PATCH, PATCH), sw_batch_size=1,
-                        predictor=lambda t: net(t)[0],   # solo la salida a full-res
+                        predictor=lambda t: net(t),   # solo la salida a full-res
                         overlap=0.5, sw_device=dev, device="cpu")  # stitching en CPU: el volumen
                         # completo (3 canales, tamaño real del paciente) no compite por VRAM con el training
                 preds  = [post_pred(p)  for p in decollate_batch(logits)]
