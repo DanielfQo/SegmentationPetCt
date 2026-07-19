@@ -51,7 +51,7 @@ RAW_RELATIVE_DIRS = [
 # Salida del preprocesamiento determinista (paso 1). make_datalist.py (paso 2) lee de aquí.
 # Hermana de HECKTOR2025_raw en la raíz del repo (deterministic_transforms.py vive en
 # modelos/segNet/, así que hacen falta 3 .parent para llegar a la raíz).
-OUTPUT_ROOT = Path(__file__).resolve().parent.parent.parent / "HECKTOR2025_preprocessed"
+OUTPUT_ROOT =  "./HECKTOR2025_preprocessed"
 
 # Cache de train_1fold.py para load_transforms() (solo IO+concat: ya es barato porque
 # lo pesado -resample/crop/normalización- quedó resuelto en OUTPUT_ROOT).
