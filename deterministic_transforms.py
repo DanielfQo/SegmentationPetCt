@@ -105,11 +105,17 @@ class CropHeadAndNeckd(MapTransform):
     Usa SpatialCrop (no slicing directo) porque es lo que MONAI usa para mantener
     el affine del MetaTensor consistente con el nuevo origen tras el recorte; un
     slice manual (`tensor[:, x0:x1, ...]`) NO actualiza el affine y dejaría el
-    NIfTI guardado con el origen físico del volumen sin recortar (verificado)."""
-    def __init__(self, keys, head_key="pt", body_key="ct",
+    NIfTI guardado con el origen físico del volumen sin recortar (verificado).
+
+    Antes de recortar, guarda en d["_hn_pre_crop_label_counts"] los voxeles de
+    tumor (clase 1) y ganglios (clase 2) que había ANTES del recorte, para que
+    preprocess_case() pueda detectar no solo el caso "eliminado por completo"
+    (ya cubierto por el conteo final == 0) sino el caso más sutil de una lesión
+    que queda CORTADA: sobreviven algunos voxeles pero no todos."""
+    def __init__(self, keys, head_key="pt", body_key="ct", label_key="label",
                  size_mm=(200, 200, 310), body_thr=-500):
         super().__init__(keys)
-        self.head_key, self.body_key = head_key, body_key
+        self.head_key, self.body_key, self.label_key = head_key, body_key, label_key
         self.sx, self.sy, self.sz = size_mm
         self.body_thr = body_thr
 
@@ -134,6 +140,10 @@ class CropHeadAndNeckd(MapTransform):
         cy = int((ys.min() + ys.max()) // 2) if len(ys) else body.shape[1] // 2
         x0 = max(0, cx - self.sx // 2); x1 = x0 + self.sx
         y0 = max(0, cy - self.sy // 2); y1 = y0 + self.sy
+
+        label = d.get(self.label_key)
+        if label is not None:
+            d["_hn_pre_crop_label_counts"] = {c: int((label == c).sum()) for c in (1, 2)}
 
         cropper = SpatialCrop(roi_start=[x0, y0, z0], roi_end=[x1, y1, z1])
         for k in self.key_iterator(d):
@@ -249,16 +259,41 @@ def save_case(case_id, transformed, output_root):
         shutil.move(str(tmp / f"{case_id}.nii.gz"), str(labels_dir / f"{case_id}.nii.gz"))
 
 
+_LABEL_CLASS_NAMES = {1: "tumor", 2: "ganglios"}
+
+
 def preprocess_case(case_id, files, transform, output_root):
     """Corre el pipeline para un caso, cuenta voxeles de tumor (clase 1) y
     ganglios (clase 2) en la máscara YA recortada -para detectar si el recorte
-    H&N se llevó puesto el GTV- y guarda. Devuelve (n_tumor, n_nodes)."""
+    H&N se llevó puesto el GTV- y guarda. También compara contra los conteos
+    PRE-recorte que deja CropHeadAndNeckd (d["_hn_pre_crop_label_counts"]) para
+    detectar el caso de una lesión CORTADA (sobreviven algunos voxeles, pero no
+    todos) y no solo el de una lesión eliminada por completo. Alerta por
+    stdout apenas lo detecta.
+
+    Devuelve (n_tumor, n_nodes, truncated): truncated es un dict
+    {"tumor"|"ganglios": (antes, despues, pct_perdido)} con las clases cortadas
+    (vacío si ninguna lo fue)."""
     transformed = transform(files)
     lbl = transformed["label"]
     n_tumor = int((lbl == 1).sum())
     n_nodes = int((lbl == 2).sum())
+
+    pre_crop = transformed.get("_hn_pre_crop_label_counts", {})
+    after_by_class = {1: n_tumor, 2: n_nodes}
+    truncated = {}
+    for cls, name in _LABEL_CLASS_NAMES.items():
+        before = pre_crop.get(cls)
+        after = after_by_class[cls]
+        if before is not None and before > 0 and after < before:
+            pct = 100.0 * (before - after) / before
+            truncated[name] = (before, after, pct)
+            estado = "eliminado por completo" if after == 0 else "INCOMPLETO (quedan algunos voxeles)"
+            print(f"[ALERTA] {case_id}: el recorte H&N cortó {name} "
+                  f"({before} -> {after} voxeles, -{pct:.1f}%)  <-- {estado}")
+
     save_case(case_id, transformed, output_root)
-    return n_tumor, n_nodes
+    return n_tumor, n_nodes, truncated
 
 
 # ----------------------------- Carga del resultado (para entrenamiento) -----------------------------
@@ -337,13 +372,19 @@ def main():
     transform = compute_transforms()
     n_ok, n_err = 0, 0
     empty_cases = []
+    truncated_cases = []
     for i, case_id in enumerate(to_process, start=1):
         try:
-            n_t, n_n = preprocess_case(case_id, cases_dict[case_id], transform, args.output_root)
+            n_t, n_n, truncated = preprocess_case(case_id, cases_dict[case_id], transform, args.output_root)
             n_ok += 1
-            flag = "  <-- SIN ETIQUETAS" if (n_t == 0 and n_n == 0) else ""
+            flags = []
             if n_t == 0 and n_n == 0:
                 empty_cases.append(case_id)
+                flags.append("SIN ETIQUETAS")
+            if truncated:
+                truncated_cases.append(case_id)
+                flags.append("LESION CORTADA")
+            flag = ("  <-- " + " / ".join(flags)) if flags else ""
             print(f"[{i}/{len(to_process)}] {case_id} OK  (tumor={n_t} nodes={n_n}){flag}")
         except Exception as exc:  # noqa: BLE001 - se registra y se sigue con el resto del dataset
             n_err += 1
@@ -356,6 +397,12 @@ def main():
         print("  " + ", ".join(empty_cases))
         print("  Revisa si el recorte H&N los tiro (arreglar) o si son casos sin GTV (el "
               "paper menciona que a veces falta el tumor).")
+
+    if truncated_cases:
+        print(f"\nATENCION: {len(truncated_cases)} casos con tumor/ganglios CORTADOS por el "
+              f"recorte H&N (quedan incompletos, no vacíos del todo -detalle arriba en cada [ALERTA]):")
+        print("  " + ", ".join(truncated_cases))
+        print("  Sube size_mm o revisa DOWN_MM/pet_thr para esos casos.")
 
 
 if __name__ == "__main__":
