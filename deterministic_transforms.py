@@ -113,11 +113,12 @@ class CropHeadAndNeckd(MapTransform):
     (ya cubierto por el conteo final == 0) sino el caso más sutil de una lesión
     que queda CORTADA: sobreviven algunos voxeles pero no todos."""
     def __init__(self, keys, head_key="pt", body_key="ct", label_key="label",
-                 size_mm=(200, 200, 310), body_thr=-500):
+                 size_mm=(200, 200, 310), body_thr=-500, head_band_mm=60):
         super().__init__(keys)
         self.head_key, self.body_key, self.label_key = head_key, body_key, label_key
         self.sx, self.sy, self.sz = size_mm
         self.body_thr = body_thr
+        self.head_band_mm = head_band_mm
 
     def __call__(self, data):
         d = dict(data)
@@ -132,8 +133,18 @@ class CropHeadAndNeckd(MapTransform):
         z0 = max(0, z_top - self.sz)
         z1 = z_top
 
-        # Línea media (x,y): centroide del cuerpo en la franja superior de la caja.
-        slab = body[:, :, z0:z1]
+        # Línea media (x,y): centroide del cuerpo en una banda ANGOSTA (head_band_mm,
+        # ~ancho de una cabeza) pegada al tope, NO en toda la altura [z0:z1]. Si el FOV
+        # nativo es más corto que size_mm (CHUM-001: solo ~295mm de Z, pedimos 310mm),
+        # z0 se clampea a 0 y [z0:z1] termina siendo casi todo el cuerpo -torso y hombros
+        # incluidos-; promediar la extensión lateral sobre esa franja tan alta arrastra
+        # el centro hacia los hombros (más anchos que el cuello) y desplaza la caja lo
+        # suficiente como para cortar el tumor. Verificado en CHUM-001: con la franja
+        # completa cy=209 (corta el tumor en Y); con una banda de 60mm cy=299-300 (el
+        # tumor entero queda adentro). Independiente de self.sz para no heredar el
+        # mismo problema si la caja completa también termina clampeada.
+        slab_z0 = max(z0, z1 - self.head_band_mm)
+        slab = body[:, :, slab_z0:z1]
         xs = torch.where(slab.any(2).any(1))[0]
         ys = torch.where(slab.any(2).any(0))[0]
         cx = int((xs.min() + xs.max()) // 2) if len(xs) else body.shape[0] // 2
@@ -144,6 +155,13 @@ class CropHeadAndNeckd(MapTransform):
         label = d.get(self.label_key)
         if label is not None:
             d["_hn_pre_crop_label_counts"] = {c: int((label == c).sum()) for c in (1, 2)}
+            fg = (label[0] > 0)
+            idx = torch.where(fg)
+            if len(idx[0]):
+                print(f"  label bbox: x[{int(idx[0].min())},{int(idx[0].max())}] "
+                      f"y[{int(idx[1].min())},{int(idx[1].max())}] "
+                      f"z[{int(idx[2].min())},{int(idx[2].max())}]")
+                print(f"  crop  box : x[{x0},{x1}] y[{y0},{y1}] z[{z0},{z1}]  (z_top={z_top})")
 
         cropper = SpatialCrop(roi_start=[x0, y0, z0], roi_end=[x1, y1, z1])
         for k in self.key_iterator(d):
