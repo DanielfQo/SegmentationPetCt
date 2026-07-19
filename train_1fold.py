@@ -9,12 +9,14 @@ import csv
 import torch
 from torch.utils.data import DataLoader
 from monai.data import PersistentDataset, decollate_batch
+from monai.data.utils import pickle_hashing
 from monai.losses import DiceCELoss, DeepSupervisionLoss
 from monai.metrics import DiceMetric
 from monai.inferers import sliding_window_inference
 from monai.networks.nets import SegResNetDS
 from monai.transforms import AsDiscrete
-from transforms_hecktor import deterministic_transforms, random_transforms, val_transforms
+from deterministic_transforms import CACHE_DIR, load_transforms, val_transforms
+from transforms_hecktor import random_transforms
 
 # ======== KNOBS ========
 # Tu GPU tiene ~7.6 GiB. PATCH=128 + INIT_FILTERS=32 + DSDEPTH=4 no cupo (OOM en backward
@@ -37,7 +39,8 @@ datalist_path = "datalist_1fold.json"
 try:
     dl = json.load(open(datalist_path))["training"]
 except FileNotFoundError:
-    print(f"Error: No se encontró '{datalist_path}'. Ejecuta 'make_datalist.py' primero.")
+    print(f"Error: No se encontró '{datalist_path}'. Ejecuta 'deterministic_transforms.py' "
+          f"y luego 'make_datalist.py' primero.")
     exit(1)
 
 train_files = [{"ct": d["image"][0], "pt": d["image"][1], "label": d["label"]}
@@ -47,16 +50,21 @@ val_files   = [{"ct": d["image"][0], "pt": d["image"][1], "label": d["label"]}
 
 print(f"Train cases: {len(train_files)}, Val cases: {len(val_files)}")
 
-# Crear directorios de caché para preprocesamiento persistente
-cache_dir_train = "./persistent_cache_train"
-cache_dir_val   = "./persistent_cache_val"
-os.makedirs(cache_dir_train, exist_ok=True)
-os.makedirs(cache_dir_val, exist_ok=True)
+# Lo pesado (resample/crop/normalización) ya quedó resuelto como NIfTI en
+# HECKTOR2025_preprocessed por deterministic_transforms.py (paso 1). Acá solo se
+# cachea la carga (load_transforms/val_transforms), barata pero no gratis si se repite
+# cada época.
+os.makedirs(CACHE_DIR, exist_ok=True)
 
-# PersistentDataset cachea SOLO las transformaciones deterministas (pesadas).
-# Las transformaciones aleatorias (data augmentation) se aplican on-the-fly después.
-train_ds = PersistentDataset(train_files, deterministic_transforms(), cache_dir=cache_dir_train)
-val_ds   = PersistentDataset(val_files,   val_transforms(), cache_dir=cache_dir_val)
+# hash_transform: la clave de caché de PersistentDataset por defecto depende SOLO de las
+# rutas de entrada, no del transform usado. load_transforms() (train, ct/pt separados) y
+# val_transforms() (val, concatenado en "image") son distintos y comparten CACHE_DIR, así
+# que se incluye el hash del transform para que un mismo caso nunca pueda leer del cache
+# la salida del OTRO pipeline si algún día train/val dejaran de ser disjuntos.
+train_ds = PersistentDataset(train_files, load_transforms(), cache_dir=CACHE_DIR,
+                              hash_transform=pickle_hashing)
+val_ds   = PersistentDataset(val_files,   val_transforms(), cache_dir=CACHE_DIR,
+                              hash_transform=pickle_hashing)
 
 # Wrapper que aplica augmentation al vuelo sobre los datos cacheados
 random_xf = random_transforms(patch=PATCH)
