@@ -128,7 +128,27 @@ class CropHeadAndNeckd(MapTransform):
     slice z_top, que por construcción cae sobre la cabeza real, no el cabezal).
     Validado: 17/18 casos de la muestra quedan con 100% de retención tras el fix
     (el único residual, MDA-390, es un tumor de ~160k voxeles que roza el límite
-    físico de sx=200mm, no un problema de centrado)."""
+    físico de sx=200mm, no un problema de centrado).
+
+    RED DE SEGURIDAD (label-aware): incluso con el fix de arriba, un puñado de
+    casos (MDA-075, MDA-120, MDA-264, MDA-265, MDA-390, USZ-005 -verificado con
+    HECKTOR2025_raw completo-) seguían perdiendo tumor/ganglios, por razones
+    variadas: señal PET casi nula en la slice z_top (USZ-005: 6 voxeles activos,
+    MDA-390: 10) que vuelve ruidoso el punto ancla, o el componente conexo
+    "cabeza" fusionado sin hueco de aire con hombro/torso (MDA-075: bbox de
+    165x153mm que arrastra el centro 157mm del tumor real). En todos estos casos
+    la lesión en sí mide bastante menos que la caja (200mm) -no es un problema de
+    tamaño de caja, es que la caja quedó mal centrada. Como este script SOLO
+    procesa casos con label (ver discover_raw_cases: exige que exista
+    {id}.nii.gz), se aprovecha ese label ya cargado como red de seguridad: si el
+    bbox real de tumor+ganglios se saldría de la caja calculada por la heurística
+    anatómica, se DESPLAZA la caja (mismo tamaño, no se agranda) lo mínimo
+    necesario para contenerlo -sacrificando algo de margen "vacío" del lado
+    contrario-, y solo si la lesión entera cabe en size_mm (si no, se centra la
+    caja en la lesión, mejor esfuerzo, igual que ya pasaba antes para MDA-390).
+    Si no hay label (d.get devuelve None) o la caja heurística ya lo contenía,
+    este paso es un no-op: no cambia el comportamiento para el caso normal ni
+    para un eventual uso en inferencia sin label."""
     def __init__(self, keys, head_key="pt", body_key="ct", label_key="label",
                  size_mm=(200, 200, 310), body_thr=-500, head_band_mm=60):
         super().__init__(keys)
@@ -174,6 +194,23 @@ class CropHeadAndNeckd(MapTransform):
         xs = np.where(cc.any(axis=(1, 2)))[0]
         ys = np.where(cc.any(axis=(0, 2)))[0]
         return int(xs.min()), int(xs.max()), int(ys.min()), int(ys.max())
+
+    @staticmethod
+    def _shift_to_contain(box0, box1, need_lo, need_hi):
+        """Desplaza [box0,box1) (tamaño fijo box1-box0) lo mínimo necesario para
+        que contenga [need_lo,need_hi] (bbox de la lesión, inclusive). Si la
+        lesión no entra entera (need_hi-need_lo+1 > tamaño de la caja), centra
+        la caja en la lesión en vez de intentar contenerla (mejor esfuerzo)."""
+        size = box1 - box0
+        if need_hi - need_lo + 1 > size:
+            center = (need_lo + need_hi) // 2
+            box0 = center - size // 2
+        elif need_lo < box0:
+            box0 = need_lo
+        elif need_hi > box1 - 1:
+            box0 = need_hi - size + 1
+        box0 = max(0, box0)
+        return box0, box0 + size
 
     def __call__(self, data):
         d = dict(data)
@@ -226,6 +263,18 @@ class CropHeadAndNeckd(MapTransform):
         label = d.get(self.label_key)
         if label is not None:
             d["_hn_pre_crop_label_counts"] = {c: int((label == c).sum()) for c in (1, 2)}
+
+            # Red de seguridad label-aware (ver docstring de la clase): si el bbox real
+            # de tumor+ganglios se saldría de la caja anatómica de arriba, desplazarla
+            # (mismo tamaño) lo mínimo necesario para contenerlo.
+            lesion_mask = (label[0] == 1) | (label[0] == 2)
+            if bool(lesion_mask.any()):
+                lxs = torch.where(lesion_mask.any(1).any(1))[0]
+                lys = torch.where(lesion_mask.any(0).any(1))[0]
+                lzs = torch.where(lesion_mask.any(0).any(0))[0]
+                x0, x1 = self._shift_to_contain(x0, x1, int(lxs.min()), int(lxs.max()))
+                y0, y1 = self._shift_to_contain(y0, y1, int(lys.min()), int(lys.max()))
+                z0, z1 = self._shift_to_contain(z0, z1, int(lzs.min()), int(lzs.max()))
 
         cropper = SpatialCrop(roi_start=[x0, y0, z0], roi_end=[x1, y1, z1])
         for k in self.key_iterator(d):
