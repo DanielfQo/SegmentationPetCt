@@ -30,6 +30,7 @@ import numpy as np
 import torch
 from monai import transforms as T
 from monai.transforms import MapTransform, SpatialCrop
+from scipy import ndimage
 
 KEYS = ["ct", "pt", "label"]
 
@@ -111,7 +112,23 @@ class CropHeadAndNeckd(MapTransform):
     tumor (clase 1) y ganglios (clase 2) que había ANTES del recorte, para que
     preprocess_case() pueda detectar no solo el caso "eliminado por completo"
     (ya cubierto por el conteo final == 0) sino el caso más sutil de una lesión
-    que queda CORTADA: sobreviven algunos voxeles pero no todos."""
+    que queda CORTADA: sobreviven algunos voxeles pero no todos.
+
+    BUG CORREGIDO (afectaba 149/728 casos, siempre cortando el tumor en Y hacia
+    el lado posterior): el body_thr detecta como "cuerpo" cualquier HU > -500,
+    lo que incluye el cabezal/máscara de inmovilización -omnipresente en las CT
+    de planificación H&N de HECKTOR-, normalmente ubicado detrás de la cabeza y
+    DESCONECTADO de ella por un hueco de aire. El bbox crudo (min/max) de la
+    banda mezclaba ambos blobs y el punto medio quedaba arrastrado ~1-40mm hacia
+    atrás, cortando el tumor (anterior por naturaleza: orofaringe/lengua/laringe).
+    Verificado con conteo de componentes conexos + hueco de aire de 35-49mm en
+    los 9 casos "sin etiquetas" y 8/9 de una muestra de "cortados". Fix: en vez
+    del bbox del blob completo, se etiquetan los componentes conexos de la banda
+    y se usa el que contiene el punto ancla (centroide de señal PET activa en la
+    slice z_top, que por construcción cae sobre la cabeza real, no el cabezal).
+    Validado: 17/18 casos de la muestra quedan con 100% de retención tras el fix
+    (el único residual, MDA-390, es un tumor de ~160k voxeles que roza el límite
+    físico de sx=200mm, no un problema de centrado)."""
     def __init__(self, keys, head_key="pt", body_key="ct", label_key="label",
                  size_mm=(200, 200, 310), body_thr=-500, head_band_mm=60):
         super().__init__(keys)
@@ -119,6 +136,44 @@ class CropHeadAndNeckd(MapTransform):
         self.sx, self.sy, self.sz = size_mm
         self.body_thr = body_thr
         self.head_band_mm = head_band_mm
+
+    @staticmethod
+    def _select_head_component(slab_body_np, anchor_xy):
+        """Bbox (xmin,xmax,ymin,ymax) del componente conexo de slab_body_np
+        (bool, X,Y,Z) que contiene anchor_xy=(x,y) cerca del tope en Z (la
+        cabeza real, según la señal PET). Si el ancla no cae sobre ningún
+        componente (raro), usa el componente más grande como respaldo. Esto es
+        lo que evita que el cabezal/máscara de inmovilización -un blob separado
+        por aire, con HU > body_thr igual que el cuerpo- contamine el cálculo
+        del centro (x,y) de la caja."""
+        structure = np.ones((3, 3, 3), dtype=int)
+        labeled, n = ndimage.label(slab_body_np, structure=structure)
+        if n == 0:
+            return None
+
+        ax, ay = anchor_xy
+        top_z = slab_body_np.shape[2] - 1
+        label_id = None
+        for dz in range(min(10, slab_body_np.shape[2])):
+            z = top_z - dz
+            for radius in range(0, 30, 5):
+                x0, x1 = max(0, ax - radius), min(slab_body_np.shape[0], ax + radius + 1)
+                y0, y1 = max(0, ay - radius), min(slab_body_np.shape[1], ay + radius + 1)
+                patch = labeled[x0:x1, y0:y1, z]
+                nz = patch[patch > 0]
+                if nz.size:
+                    label_id = int(nz[0])
+                    break
+            if label_id is not None:
+                break
+        if label_id is None:
+            sizes = ndimage.sum(slab_body_np, labeled, range(1, n + 1))
+            label_id = 1 + int(np.argmax(sizes))
+
+        cc = labeled == label_id
+        xs = np.where(cc.any(axis=(1, 2)))[0]
+        ys = np.where(cc.any(axis=(0, 2)))[0]
+        return int(xs.min()), int(xs.max()), int(ys.min()), int(ys.max())
 
     def __call__(self, data):
         d = dict(data)
@@ -145,23 +200,32 @@ class CropHeadAndNeckd(MapTransform):
         # mismo problema si la caja completa también termina clampeada.
         slab_z0 = max(z0, z1 - self.head_band_mm)
         slab = body[:, :, slab_z0:z1]
-        xs = torch.where(slab.any(2).any(1))[0]
-        ys = torch.where(slab.any(2).any(0))[0]
-        cx = int((xs.min() + xs.max()) // 2) if len(xs) else body.shape[0] // 2
-        cy = int((ys.min() + ys.max()) // 2) if len(ys) else body.shape[1] // 2
+
+        # Punto ancla para elegir el componente conexo correcto dentro de la banda:
+        # centroide de la señal PET activa en la slice z_top (ahí es, por construcción,
+        # donde se detectó la cabeza -ver arriba-, nunca el cabezal/inmovilización).
+        pet_top = pet[:, :, z_top] > pet_thr
+        axs, ays = torch.where(pet_top)
+        if len(axs):
+            anchor = (int(axs.float().mean()), int(ays.float().mean()))
+        else:
+            anchor = (body.shape[0] // 2, body.shape[1] // 2)
+
+        head_bbox = self._select_head_component(slab.numpy(), anchor)
+        if head_bbox is not None:
+            xmin, xmax, ymin, ymax = head_bbox
+            cx, cy = (xmin + xmax) // 2, (ymin + ymax) // 2
+        else:
+            xs = torch.where(slab.any(2).any(1))[0]
+            ys = torch.where(slab.any(2).any(0))[0]
+            cx = int((xs.min() + xs.max()) // 2) if len(xs) else body.shape[0] // 2
+            cy = int((ys.min() + ys.max()) // 2) if len(ys) else body.shape[1] // 2
         x0 = max(0, cx - self.sx // 2); x1 = x0 + self.sx
         y0 = max(0, cy - self.sy // 2); y1 = y0 + self.sy
 
         label = d.get(self.label_key)
         if label is not None:
             d["_hn_pre_crop_label_counts"] = {c: int((label == c).sum()) for c in (1, 2)}
-            fg = (label[0] > 0)
-            idx = torch.where(fg)
-            if len(idx[0]):
-                print(f"  label bbox: x[{int(idx[0].min())},{int(idx[0].max())}] "
-                      f"y[{int(idx[1].min())},{int(idx[1].max())}] "
-                      f"z[{int(idx[2].min())},{int(idx[2].max())}]")
-                print(f"  crop  box : x[{x0},{x1}] y[{y0},{y1}] z[{z0},{z1}]  (z_top={z_top})")
 
         cropper = SpatialCrop(roi_start=[x0, y0, z0], roi_end=[x1, y1, z1])
         for k in self.key_iterator(d):

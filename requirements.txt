@@ -5,3 +5,4 @@ monai[all]==1.6.0
 nibabel
 tqdm
 einops
+scipy
