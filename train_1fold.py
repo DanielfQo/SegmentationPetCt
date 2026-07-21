@@ -92,8 +92,14 @@ val_ld   = DataLoader(val_ds,       batch_size=1, shuffle=False, num_workers=2)
 net = SegResNetDS(spatial_dims=3, init_filters=INIT_FILTERS, in_channels=2,
                   out_channels=3, blocks_down=(1, 2, 2, 4, 4, 4), norm="batch",
                   act="relu", dsdepth=DSDEPTH).to(dev)
-loss_fn = DeepSupervisionLoss(DiceCELoss(softmax=True, to_onehot_y=True),
-                              weight_mode="exp")
+# DiceCELoss: include_background=False para que la componente Dice solo mida
+# clases foreground (tumor, ganglios); smooth_nr/smooth_dr evitan 0/0 -> NaN
+# cuando un parche cae en puro fondo (frecuente con tumores pequeños).
+base_loss = DiceCELoss(softmax=True, to_onehot_y=True,
+                       include_background=False,
+                       smooth_nr=1e-5, smooth_dr=1e-5,
+                       lambda_dice=1.0, lambda_ce=1.0)
+loss_fn = DeepSupervisionLoss(base_loss, weight_mode="exp")
 opt   = torch.optim.AdamW(net.parameters(), lr=2e-4, weight_decay=1e-5)
 sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=MAX_EPOCHS)
 scaler = torch.amp.GradScaler("cuda", enabled=USE_AMP)
@@ -137,6 +143,11 @@ for epoch in range(start_epoch, MAX_EPOCHS):
         with torch.amp.autocast("cuda", enabled=USE_AMP):
             out = net(x)              # lista (supervisión profunda)
             loss = loss_fn(out, y)
+        # Protección NaN: si un parche all-background genera NaN/Inf, se salta
+        # el update de pesos para no corromper el modelo entero.
+        if not torch.isfinite(loss):
+            opt.zero_grad()
+            continue
         scaler.scale(loss).backward()
         scaler.step(opt); scaler.update()
         epoch_loss += loss.item()
@@ -159,7 +170,9 @@ for epoch in range(start_epoch, MAX_EPOCHS):
         val_loss_count = 0
         # loss_fn espera lista (deep supervision), pero sliding_window_inference devuelve
         # solo la salida full-res. Se usa la DiceCELoss base directamente para val.
-        val_loss_fn = DiceCELoss(softmax=True, to_onehot_y=True)
+        val_loss_fn = DiceCELoss(softmax=True, to_onehot_y=True,
+                                 include_background=False,
+                                 smooth_nr=1e-5, smooth_dr=1e-5)
         with torch.no_grad():
             for batch in val_ld:
                 x = batch["image"].to(dev)
