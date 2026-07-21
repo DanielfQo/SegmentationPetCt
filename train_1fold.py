@@ -125,7 +125,7 @@ csv_file = "metrics_log.csv"
 if not (resuming and os.path.exists(csv_file)):
     with open(csv_file, mode="w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["epoch", "loss", "dice_tumor", "dice_ganglios", "mean_dice"])
+        writer.writerow(["epoch", "train_loss", "val_loss", "dice_tumor", "dice_ganglios", "mean_dice"])
 
 for epoch in range(start_epoch, MAX_EPOCHS):
     net.train()
@@ -146,6 +146,7 @@ for epoch in range(start_epoch, MAX_EPOCHS):
     print(f"epoch {epoch+1:3d}/{MAX_EPOCHS}  loss={mean_loss:.4f}")
 
     # --- validación con sliding window (parche 192^3 como en inferencia del paper) ---
+    val_loss_str = ""
     val_tumor = ""
     val_ganglios = ""
     val_mean = ""
@@ -154,6 +155,11 @@ for epoch in range(start_epoch, MAX_EPOCHS):
         net.eval()
         if dev == "cuda":
             torch.cuda.empty_cache()  # libera bloques cacheados del entrenamiento antes de stitchear
+        val_loss_sum = 0.0
+        val_loss_count = 0
+        # loss_fn espera lista (deep supervision), pero sliding_window_inference devuelve
+        # solo la salida full-res. Se usa la DiceCELoss base directamente para val.
+        val_loss_fn = DiceCELoss(softmax=True, to_onehot_y=True)
         with torch.no_grad():
             for batch in val_ld:
                 x = batch["image"].to(dev)
@@ -163,17 +169,22 @@ for epoch in range(start_epoch, MAX_EPOCHS):
                         x, roi_size=(PATCH, PATCH, PATCH), sw_batch_size=1,
                         predictor=lambda t: net(t),   # solo la salida a full-res
                         overlap=0.5, sw_device=dev, device="cpu")  # stitching en CPU: el volumen
+                # Val loss (DiceCE sin deep supervision, sobre el volumen completo)
+                val_loss_sum += val_loss_fn(logits.float(), y.cpu().float()).item()
+                val_loss_count += 1
                         # completo (3 canales, tamaño real del paciente) no compite por VRAM con el training
                 preds  = [post_pred(p)  for p in decollate_batch(logits)]
-                labels = [post_label(l) for l in decollate_batch(y)]
+                labels = [post_label(l) for l in decollate_batch(y.cpu())]
                 dice_metric(y_pred=preds, y=labels)
             scores = dice_metric.aggregate()      # [dice_tumor, dice_ganglios]
             dice_metric.reset()
             mean_dice = scores.mean().item()
+            mean_val_loss = val_loss_sum / max(val_loss_count, 1)
+            val_loss_str = f"{mean_val_loss:.4f}"
             val_tumor = f"{scores[0]:.4f}"
             val_ganglios = f"{scores[1]:.4f}"
             val_mean = f"{mean_dice:.4f}"
-            print(f"epoch {epoch+1:3d}  dice_tumor={val_tumor}  "
+            print(f"epoch {epoch+1:3d}  val_loss={val_loss_str}  dice_tumor={val_tumor}  "
                   f"dice_ganglios={val_ganglios}  media={val_mean}")
             if mean_dice > best:
                 best = mean_dice
@@ -191,6 +202,6 @@ for epoch in range(start_epoch, MAX_EPOCHS):
     # Guardar en CSV
     with open(csv_file, mode="a", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow([epoch + 1, f"{mean_loss:.4f}", val_tumor, val_ganglios, val_mean])
+        writer.writerow([epoch + 1, f"{mean_loss:.4f}", val_loss_str, val_tumor, val_ganglios, val_mean])
 
 print(f"Mejor Dice medio en validación: {best:.4f}")
